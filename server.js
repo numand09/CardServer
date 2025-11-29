@@ -4,8 +4,21 @@ const bcrypt = require('bcryptjs');
 const cors = require('cors');
 
 const app = express();
-app.use(express.json());
+
+// CORS ve JSON middleware - SIRALAMA ÖNEMLİ!
 app.use(cors());
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+
+// Health check - İLK SIRADA OLMALI
+app.get('/', (req, res) => {
+  res.json({ 
+    status: 'Server çalışıyor!',
+    endpoints: ['/register', '/login', '/find-match', '/check-match', '/cancel-matchmaking'],
+    queueLength: matchmakingQueue.length,
+    activeMatches: activeMatches.size
+  });
+});
 
 // MongoDB bağlantısı
 mongoose.connect(process.env.MONGODB_URI, {
@@ -25,14 +38,31 @@ const User = mongoose.model('User', UserSchema);
 
 // Maç bekleyen kullanıcılar için kuyruk
 let matchmakingQueue = [];
+// Bulunan maçları sakla (her iki kullanıcı da bilgiyi alabilsin)
+let activeMatches = new Map();
 
 // Maç bulma endpoint'i
 app.post('/find-match', async (req, res) => {
+  console.log('Find-match isteği alındı:', req.body);
   try {
     const { userId, username } = req.body;
     
     if (!userId || !username) {
       return res.json({ success: false, message: 'UserId ve username gerekli' });
+    }
+    
+    // Kullanıcı için zaten aktif bir maç var mı kontrol et
+    if (activeMatches.has(userId)) {
+      const matchData = activeMatches.get(userId);
+      console.log(`${username} için aktif maç bulundu:`, matchData);
+      return res.json({
+        success: true,
+        matchFound: true,
+        matchId: matchData.matchId,
+        opponent: matchData.opponent,
+        opponentId: matchData.opponentId,
+        message: 'Maç bulundu!'
+      });
     }
     
     // Kullanıcı zaten kuyrukta mı kontrol et
@@ -51,7 +81,30 @@ app.post('/find-match', async (req, res) => {
       
       console.log(`Maç bulundu! ${username} vs ${opponent.username} - Match ID: ${matchId}`);
       
-      // Her iki kullanıcıya da maç bilgisi gönder
+      // Her iki kullanıcı için maç verilerini sakla
+      const player1Data = {
+        matchId: matchId,
+        opponent: opponent.username,
+        opponentId: opponent.userId
+      };
+      
+      const player2Data = {
+        matchId: matchId,
+        opponent: username,
+        opponentId: userId
+      };
+      
+      activeMatches.set(userId, player1Data);
+      activeMatches.set(opponent.userId, player2Data);
+      
+      // 30 saniye sonra maç verilerini temizle (her iki kullanıcı da bilgiyi almış olmalı)
+      setTimeout(() => {
+        activeMatches.delete(userId);
+        activeMatches.delete(opponent.userId);
+        console.log(`Maç ${matchId} verileri temizlendi`);
+      }, 30000);
+      
+      // İkinci kullanıcıya yanıt gönder
       res.json({
         success: true,
         matchFound: true,
@@ -61,20 +114,12 @@ app.post('/find-match', async (req, res) => {
         message: 'Maç bulundu!'
       });
       
-      // Rakip kullanıcıya bilgi gönderilecek (polling ile alınacak)
-      opponent.matchData = {
-        matchId: matchId,
-        opponent: username,
-        opponentId: userId
-      };
-      
     } else {
       // Kuyruğa ekle
       matchmakingQueue.push({
         userId: userId,
         username: username,
-        timestamp: Date.now(),
-        matchData: null
+        timestamp: Date.now()
       });
       
       console.log(`${username} maç kuyruğuna eklendi. Kuyruk uzunluğu: ${matchmakingQueue.length}`);
@@ -101,6 +146,20 @@ app.post('/check-match', async (req, res) => {
       return res.json({ success: false, message: 'UserId gerekli' });
     }
     
+    // Önce aktif maçları kontrol et
+    if (activeMatches.has(userId)) {
+      const matchData = activeMatches.get(userId);
+      console.log(`Check-match: ${userId} için maç bulundu:`, matchData);
+      
+      return res.json({
+        success: true,
+        matchFound: true,
+        matchId: matchData.matchId,
+        opponent: matchData.opponent,
+        opponentId: matchData.opponentId
+      });
+    }
+    
     // Kuyrukta kullanıcıyı bul
     const userIndex = matchmakingQueue.findIndex(p => p.userId === userId);
     
@@ -108,28 +167,14 @@ app.post('/check-match', async (req, res) => {
       return res.json({ success: false, inQueue: false, message: 'Kuyrukta değilsiniz' });
     }
     
-    const user = matchmakingQueue[userIndex];
-    
-    // Maç bulundu mu kontrol et
-    if (user.matchData) {
-      // Kullanıcıyı kuyruktan çıkar
-      matchmakingQueue.splice(userIndex, 1);
-      
-      res.json({
-        success: true,
-        matchFound: true,
-        matchId: user.matchData.matchId,
-        opponent: user.matchData.opponent,
-        opponentId: user.matchData.opponentId
-      });
-    } else {
-      res.json({
-        success: true,
-        inQueue: true,
-        matchFound: false,
-        message: 'Rakip bekleniyor...'
-      });
-    }
+    // Hala bekliyor
+    res.json({
+      success: true,
+      inQueue: true,
+      matchFound: false,
+      message: 'Rakip bekleniyor...',
+      queuePosition: userIndex + 1
+    });
     
   } catch (error) {
     console.error('Maç kontrol hatası:', error);
@@ -146,10 +191,17 @@ app.post('/cancel-matchmaking', async (req, res) => {
       return res.json({ success: false, message: 'UserId gerekli' });
     }
     
+    // Kuyruktan çıkar
     const index = matchmakingQueue.findIndex(p => p.userId === userId);
     if (index !== -1) {
       matchmakingQueue.splice(index, 1);
       console.log(`Kullanıcı kuyruktan çıktı. Kalan: ${matchmakingQueue.length}`);
+    }
+    
+    // Aktif maçtan çıkar
+    if (activeMatches.has(userId)) {
+      activeMatches.delete(userId);
+      console.log(`Kullanıcı aktif maçtan çıkarıldı: ${userId}`);
     }
     
     res.json({ success: true, message: 'Maç araması iptal edildi' });
@@ -161,6 +213,7 @@ app.post('/cancel-matchmaking', async (req, res) => {
 
 // Kayıt endpoint
 app.post('/register', async (req, res) => {
+  console.log('Register isteği alındı:', req.body);
   try {
     const { username, password } = req.body;
     
@@ -179,12 +232,14 @@ app.post('/register', async (req, res) => {
     await newUser.save();
     res.json({ success: true, message: 'Kayıt başarılı' });
   } catch (error) {
+    console.error('Register hatası:', error);
     res.json({ success: false, message: 'Hata: ' + error.message });
   }
 });
 
 // Login endpoint
 app.post('/login', async (req, res) => {
+  console.log('Login isteği alındı:', req.body);
   try {
     const { username, password } = req.body;
     
@@ -200,6 +255,7 @@ app.post('/login', async (req, res) => {
     
     res.json({ success: true, message: 'Giriş başarılı', userId: user._id });
   } catch (error) {
+    console.error('Login hatası:', error);
     res.json({ success: false, message: 'Hata: ' + error.message });
   }
 });
