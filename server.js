@@ -6,7 +6,6 @@ const WebSocket = require('ws');
 require('dotenv').config();
 
 const authRoutes = require('./routes/authRoutes');
-const matchmakingRoutes = require('./routes/matchmakingRoutes');
 
 const app = express();
 app.use(cors());
@@ -20,12 +19,11 @@ mongoose.connect(process.env.MONGODB_URI, {
     useNewUrlParser: true, 
     useUnifiedTopology: true 
 })
-.then(() => console.log('MongoDB Bağlandı'))
-.catch(err => console.error('MongoDB Hatası:', err));
+.then(() => console.log('✅ MongoDB Bağlandı'))
+.catch(err => console.error('❌ MongoDB Hatası:', err));
 
-// Routes
+// --- AUTH ROUTES ---
 app.use('/auth', authRoutes);
-app.use('/matchmaking', matchmakingRoutes);
 
 // --- MATCHMAKING & MATCH MANAGEMENT ---
 let matchmakingQueue = [];
@@ -34,9 +32,70 @@ const userSockets = new Map(); // userId -> ws
 const activeMatches = new Map(); // matchId -> { player1, player2, createdAt }
 const playerMatches = new Map(); // userId -> matchId
 
-// WebSocket Bağlantı Yönetimi
+// --- HTTP MATCHMAKING ENDPOINTS (Oyun Sahnesinden Kullanılacak) ---
+
+// Maç durumu kontrolü (heartbeat)
+app.post('/matchmaking/check-match-status', (req, res) => {
+    const { matchId, userId } = req.body;
+    
+    if (!matchId || !userId) {
+        return res.status(400).json({ 
+            success: false, 
+            message: 'matchId ve userId gerekli' 
+        });
+    }
+    
+    const matchData = activeMatches.get(matchId);
+    
+    if (!matchData) {
+        return res.json({ 
+            success: true, 
+            bothPlayersLeft: true,
+            message: 'Maç bulunamadı veya sona erdi' 
+        });
+    }
+
+    // Her iki oyuncu da hala bağlı mı kontrol et
+    const player1Connected = userSockets.has(matchData.player1.userId);
+    const player2Connected = userSockets.has(matchData.player2.userId);
+
+    if (!player1Connected || !player2Connected) {
+        // Biri kopmuşsa maçı sonlandır
+        endMatch(userId, 'opponent_disconnect');
+        return res.json({ 
+            success: true, 
+            bothPlayersLeft: true,
+            message: 'Rakip bağlantısı koptu' 
+        });
+    }
+
+    res.json({ 
+        success: true, 
+        bothPlayersLeft: false,
+        message: 'Maç devam ediyor' 
+    });
+});
+
+// Oyuncu maçtan ayrılıyor
+app.post('/matchmaking/leave-match', (req, res) => {
+    const { matchId, userId, reason } = req.body;
+    
+    if (!matchId || !userId) {
+        return res.status(400).json({ 
+            success: false, 
+            message: 'matchId ve userId gerekli' 
+        });
+    }
+    
+    endMatch(userId, reason || 'quit');
+    
+    res.json({ success: true, message: 'Maçtan ayrıldınız' });
+});
+
+// --- WEBSOCKET CONNECTION MANAGEMENT ---
+
 wss.on('connection', (ws) => {
-    console.log('Yeni oyuncu bağlandı.');
+    console.log('🔌 Yeni oyuncu bağlandı.');
 
     ws.isAlive = true;
     ws.on('pong', () => { ws.isAlive = true; });
@@ -46,7 +105,7 @@ wss.on('connection', (ws) => {
             const data = JSON.parse(message);
             handleMessage(ws, data);
         } catch (e) {
-            console.error('Mesaj formatı hatası:', e);
+            console.error('❌ Mesaj formatı hatası:', e);
         }
     });
 
@@ -55,7 +114,7 @@ wss.on('connection', (ws) => {
     });
     
     ws.on('error', (error) => {
-        console.error('WebSocket hatası:', error);
+        console.error('❌ WebSocket hatası:', error);
         handleDisconnect(ws);
     });
 });
@@ -76,6 +135,8 @@ wss.on('close', () => {
     clearInterval(heartbeatInterval);
 });
 
+// --- WEBSOCKET MESSAGE HANDLERS ---
+
 function handleMessage(ws, data) {
     const { type, payload } = data;
 
@@ -92,11 +153,13 @@ function handleMessage(ws, data) {
             return;
         }
 
-        console.log(`Eşleşme aranıyor: ${username} (${userId})`);
+        console.log(`🔍 Eşleşme aranıyor: ${username} (${userId})`);
 
+        // Kuyrukta aynı kullanıcı var mı kontrol et
         const existingIndex = matchmakingQueue.findIndex(p => p.userId === userId);
         if (existingIndex !== -1) {
             matchmakingQueue[existingIndex].ws = ws; // WebSocket'i güncelle
+            sendJson(ws, 'waitingForMatch', { message: 'Rakip bekleniyor...' });
             return;
         }
 
@@ -107,6 +170,7 @@ function handleMessage(ws, data) {
             // Kendisiyle eşleşme kontrolü
             if (opponent.userId === userId) {
                 matchmakingQueue.push({ ws, userId, username });
+                sendJson(ws, 'waitingForMatch', { message: 'Rakip bekleniyor...' });
                 return;
             }
 
@@ -222,51 +286,7 @@ function sendJson(ws, type, payload) {
     }
 }
 
-// HTTP Endpoints (Oyun sahnesinden kullanılacak)
-
-// Maç durumu kontrolü (heartbeat)
-app.post('/matchmaking/check-match-status', (req, res) => {
-    const { matchId, userId } = req.body;
-    
-    const matchData = activeMatches.get(matchId);
-    
-    if (!matchData) {
-        return res.json({ 
-            success: true, 
-            bothPlayersLeft: true,
-            message: 'Maç bulunamadı' 
-        });
-    }
-
-    // Her iki oyuncu da hala bağlı mı kontrol et
-    const player1Connected = userSockets.has(matchData.player1.userId);
-    const player2Connected = userSockets.has(matchData.player2.userId);
-
-    if (!player1Connected || !player2Connected) {
-        // Biri kopmuşsa maçı sonlandır
-        endMatch(userId, 'opponent_disconnect');
-        return res.json({ 
-            success: true, 
-            bothPlayersLeft: true,
-            message: 'Rakip bağlantısı koptu' 
-        });
-    }
-
-    res.json({ 
-        success: true, 
-        bothPlayersLeft: false,
-        message: 'Maç devam ediyor' 
-    });
-});
-
-// Oyuncu maçtan ayrılıyor
-app.post('/matchmaking/leave-match', (req, res) => {
-    const { matchId, userId, reason } = req.body;
-    
-    endMatch(userId, reason || 'quit');
-    
-    res.json({ success: true, message: 'Maçtan ayrıldınız' });
-});
+// --- CLEANUP TASKS ---
 
 // Temizlik görevi - Her 5 dakikada bir eski verileri temizle
 setInterval(() => {
@@ -275,7 +295,10 @@ setInterval(() => {
     const TEN_MINUTES = 10 * 60 * 1000;
 
     // Eski kuyruk girişlerini temizle
-    matchmakingQueue = matchmakingQueue.filter(p => now - (p.timestamp || now) < FIVE_MINUTES);
+    matchmakingQueue = matchmakingQueue.filter(p => {
+        const timestamp = p.timestamp || now;
+        return now - timestamp < FIVE_MINUTES;
+    });
 
     // Eski maçları temizle
     for (const [matchId, matchData] of activeMatches) {
@@ -288,5 +311,11 @@ setInterval(() => {
     }
 }, 5 * 60 * 1000);
 
+// --- SERVER START ---
+
 const PORT = process.env.PORT || 3000;
-httpServer.listen(PORT, () => console.log(`🚀 Server çalışıyor: Port ${PORT}`));
+httpServer.listen(PORT, () => {
+    console.log(`🚀 Server çalışıyor (HTTP + WebSocket): Port ${PORT}`);
+    console.log(`📡 WebSocket: ws://localhost:${PORT}`);
+    console.log(`🌐 HTTP: http://localhost:${PORT}`);
+});
