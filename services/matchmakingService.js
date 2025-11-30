@@ -1,12 +1,11 @@
-let matchmakingQueue = [];
+const matchmakingQueue = [];
 const activeMatches = new Map();
 const playerMatches = new Map();
 
 class MatchmakingService {
   static addToQueue(user) {
-    if (playerMatches.has(user.userId)) return null;
+    if (playerMatches.has(user.userId)) return null; 
     if (matchmakingQueue.some(p => p.userId === user.userId)) return null;
-
     matchmakingQueue.push({ ...user, timestamp: Date.now() });
     return this.tryMatch(user);
   }
@@ -15,7 +14,7 @@ class MatchmakingService {
     if (!matchmakingQueue.length) return null;
     const opponent = matchmakingQueue.shift();
     if (opponent.userId === user.userId) return null;
-
+    
     const matchId = 'm_' + Date.now() + '_' + Math.random().toString(36).slice(2, 9);
     const matchData = {
       matchId,
@@ -34,11 +33,9 @@ class MatchmakingService {
   static removePlayer(userId) {
     const matchId = playerMatches.get(userId);
     if (!matchId) return;
-
     playerMatches.delete(userId);
     const m = activeMatches.get(matchId);
     if (!m) return;
-
     const other = m.player1.userId === userId ? m.player2.userId : m.player1.userId;
     if (!playerMatches.has(other)) activeMatches.delete(matchId);
   }

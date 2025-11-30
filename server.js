@@ -4,7 +4,6 @@ const cors = require('cors');
 
 const authRoutes = require('./routes/authRoutes');
 const matchmakingRoutes = require('./routes/matchmakingRoutes');
-const MatchmakingService = require('./services/matchmakingService');
 
 const app = express();
 app.use(cors());
@@ -15,6 +14,6 @@ mongoose.connect(process.env.MONGODB_URI, { useNewUrlParser: true, useUnifiedTop
 app.use('/auth', authRoutes);
 app.use('/match', matchmakingRoutes);
 
-setInterval(() => MatchmakingService.cleanupQueues(), 60000);
+setInterval(() => require('./services/matchmakingService').cleanupQueues(), 60000);
 
-app.listen(process.env.PORT || 3000, () => console.log('Server çalışıyor'));
+app.listen(process.env.PORT || 3000);
